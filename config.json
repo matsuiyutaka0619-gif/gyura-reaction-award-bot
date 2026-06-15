@@ -1,0 +1,7 @@
+{
+  "guild_id": "YOUR_GUILD_ID",
+  "excluded_channel_ids": [],
+  "timezone": "Asia/Tokyo",
+  "award_time": "20:45",
+  "message_preview_length": 80
+}
