@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -19,7 +20,7 @@ CHANNEL_TYPES_TO_SCAN = {0, 5}
 
 @dataclass
 class AwardCandidate:
-    reaction_count: int
+    voter_count: int
     message_id: str
     channel_id: str
     author_id: str
@@ -180,6 +181,86 @@ def fetch_messages_for_channel(
     return messages
 
 
+def get_reaction_emoji_identifier(reaction: dict[str, Any]) -> str:
+    emoji = reaction.get("emoji", {})
+    name = emoji.get("name")
+    emoji_id = emoji.get("id")
+
+    if not name:
+        return ""
+
+    if emoji_id:
+        return f"{name}:{emoji_id}"
+
+    return name
+
+
+def fetch_reaction_user_ids(
+    channel_id: str,
+    message_id: str,
+    reaction: dict[str, Any],
+    headers: dict[str, str],
+    bot_user_id: str,
+) -> set[str]:
+    emoji_identifier = get_reaction_emoji_identifier(reaction)
+    if not emoji_identifier:
+        return set()
+
+    encoded_emoji = quote(emoji_identifier, safe="")
+    user_ids: set[str] = set()
+    after: str | None = None
+
+    while True:
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+
+        users = request_json(
+            "GET",
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded_emoji}",
+            headers=headers,
+            allow_missing=True,
+            params=params,
+        )
+
+        if not users:
+            break
+
+        for user in users:
+            user_id = str(user.get("id", ""))
+            if user_id and user_id != bot_user_id:
+                user_ids.add(user_id)
+
+        if len(users) < 100:
+            break
+
+        after = str(users[-1]["id"])
+
+    return user_ids
+
+
+def count_unique_reaction_users(
+    channel_id: str,
+    message: dict[str, Any],
+    headers: dict[str, str],
+    bot_user_id: str,
+) -> int:
+    voter_ids: set[str] = set()
+
+    for reaction in message.get("reactions", []):
+        voter_ids.update(
+            fetch_reaction_user_ids(
+                channel_id,
+                str(message["id"]),
+                reaction,
+                headers,
+                bot_user_id,
+            )
+        )
+
+    return len(voter_ids)
+
+
 def find_winner(headers: dict[str, str], bot_user_id: str, start: datetime, end: datetime) -> AwardCandidate | None:
     winner: AwardCandidate | None = None
 
@@ -193,12 +274,15 @@ def find_winner(headers: dict[str, str], bot_user_id: str, start: datetime, end:
             if str(author.get("id")) == bot_user_id:
                 continue
 
-            reaction_count = sum(int(reaction.get("count", 0)) for reaction in message.get("reactions", []))
-            if reaction_count <= 0:
+            if not message.get("reactions"):
+                continue
+
+            voter_count = count_unique_reaction_users(channel_id, message, headers, bot_user_id)
+            if voter_count <= 0:
                 continue
 
             candidate = AwardCandidate(
-                reaction_count=reaction_count,
+                voter_count=voter_count,
                 message_id=str(message["id"]),
                 channel_id=channel_id,
                 author_id=str(author.get("id", "")),
@@ -206,7 +290,7 @@ def find_winner(headers: dict[str, str], bot_user_id: str, start: datetime, end:
                 content=message.get("content", ""),
             )
 
-            if not winner or candidate.reaction_count > winner.reaction_count:
+            if not winner or candidate.voter_count > winner.voter_count:
                 winner = candidate
 
     return winner
@@ -221,7 +305,7 @@ def build_announcement(winner: AwardCandidate | None) -> str:
     return (
         "🏆 本日のギュラ鯖リアクション賞🏆 \n\n"
         f"投稿者: <@{winner.author_id}>\n"
-        f"リアクション数: {winner.reaction_count}\n\n"
+        f"リアクション人数: {winner.voter_count}\n\n"
         f"「{preview}」\n\n"
         "元メッセージ:\n"
         f"{winner.link}"
