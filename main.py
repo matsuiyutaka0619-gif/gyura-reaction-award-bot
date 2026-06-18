@@ -16,6 +16,7 @@ import requests
 DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_EPOCH_MS = 1420070400000
 CHANNEL_TYPES_TO_SCAN = {0, 5}
+AWARD_LIMIT = 3
 
 
 @dataclass
@@ -261,8 +262,14 @@ def count_unique_reaction_users(
     return len(voter_ids)
 
 
-def find_winner(headers: dict[str, str], bot_user_id: str, start: datetime, end: datetime) -> AwardCandidate | None:
-    winner: AwardCandidate | None = None
+def find_top_candidates(
+    headers: dict[str, str],
+    bot_user_id: str,
+    start: datetime,
+    end: datetime,
+    limit: int = AWARD_LIMIT,
+) -> list[AwardCandidate]:
+    candidates: list[AwardCandidate] = []
 
     for channel in fetch_channels(headers):
         channel_id = str(channel["id"])
@@ -290,26 +297,35 @@ def find_winner(headers: dict[str, str], bot_user_id: str, start: datetime, end:
                 content=message.get("content", ""),
             )
 
-            if not winner or candidate.voter_count > winner.voter_count:
-                winner = candidate
+            candidates.append(candidate)
 
-    return winner
+    return sorted(candidates, key=lambda candidate: candidate.voter_count, reverse=True)[:limit]
 
 
-def build_announcement(winner: AwardCandidate | None) -> str:
-    if not winner:
+def build_announcement(candidates: list[AwardCandidate]) -> str:
+    if not candidates:
         return "🏆 本日のギュラ鯖リアクション賞🏆\n\n本日は対象メッセージがありませんでした。"
 
-    preview = truncate_message(winner.content, CONFIG.message_preview_length)
+    rank_labels = ["🥇 1位", "🥈 2位", "🥉 3位"]
+    lines = ["🏆 本日のギュラ鯖リアクション賞🏆"]
 
-    return (
-        "🏆 本日のギュラ鯖リアクション賞🏆 \n\n"
-        f"投稿者: <@{winner.author_id}>\n"
-        f"リアクション人数: {winner.voter_count}\n\n"
-        f"「{preview}」\n\n"
-        "元メッセージ:\n"
-        f"{winner.link}"
-    )
+    for index, candidate in enumerate(candidates):
+        preview = truncate_message(candidate.content, CONFIG.message_preview_length)
+        lines.extend(
+            [
+                "",
+                rank_labels[index],
+                f"投稿者: <@{candidate.author_id}>",
+                f"リアクション人数: {candidate.voter_count}",
+                "",
+                f"「{preview}」",
+                "",
+                "元メッセージ:",
+                candidate.link,
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 def post_webhook(content: str) -> None:
@@ -331,8 +347,8 @@ def main() -> int:
 
     print(f"Aggregation window: {start.isoformat()} - {end.isoformat()}")
     bot_user_id = fetch_bot_user_id(headers)
-    winner = find_winner(headers, bot_user_id, start, end)
-    announcement = build_announcement(winner)
+    candidates = find_top_candidates(headers, bot_user_id, start, end)
+    announcement = build_announcement(candidates)
     post_webhook(announcement)
 
     print("Announcement posted.")
