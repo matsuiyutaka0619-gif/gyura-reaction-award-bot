@@ -2,7 +2,7 @@ name: Daily Reaction Award
 
 on:
   schedule:
-    - cron: "45 11 * * *"
+    - cron: "0 20 * * *"
   workflow_dispatch:
 
 jobs:

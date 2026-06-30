@@ -50,7 +50,7 @@ def load_config(path: str = "config.json") -> Config:
         guild_id=str(data["guild_id"]),
         excluded_channel_ids={str(channel_id) for channel_id in data.get("excluded_channel_ids", [])},
         timezone_name=data.get("timezone", "Asia/Tokyo"),
-        award_time=data.get("award_time", "20:45"),
+        award_time=data.get("award_time", "05:00"),
         message_preview_length=int(data.get("message_preview_length", 80)),
     )
 
@@ -95,7 +95,11 @@ def get_window(now: datetime | None = None) -> tuple[datetime, datetime]:
     current = now.astimezone(tz) if now else datetime.now(tz)
     award_time = parse_award_time(CONFIG.award_time)
 
-    end_date = current.date()
+    if current.timetz().replace(tzinfo=None) >= award_time:
+        end_date = current.date()
+    else:
+        end_date = current.date() - timedelta(days=1)
+
     end = datetime.combine(end_date, award_time, tzinfo=tz) - timedelta(minutes=1)
     start = datetime.combine(end_date - timedelta(days=1), award_time, tzinfo=tz)
 
