@@ -17,6 +17,8 @@ DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_EPOCH_MS = 1420070400000
 CHANNEL_TYPES_TO_SCAN = {0, 5}
 AWARD_LIMIT = 3
+REQUEST_MAX_ATTEMPTS = 5
+REQUEST_BACKOFF_SECONDS = 2
 
 
 @dataclass
@@ -66,13 +68,47 @@ def request_json(
     allow_missing: bool = False,
     **kwargs: Any,
 ) -> Any:
+    attempt = 0
+
     while True:
-        response = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+        attempt += 1
+
+        try:
+            response = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+        except requests.RequestException as error:
+            if attempt < REQUEST_MAX_ATTEMPTS:
+                wait_seconds = REQUEST_BACKOFF_SECONDS * attempt
+                print(f"Request failed, retrying in {wait_seconds}s: {error}", file=sys.stderr)
+                time.sleep(wait_seconds)
+                continue
+
+            if allow_missing:
+                print(f"Skipping unavailable Discord API request after retries: {url}", file=sys.stderr)
+                return None
+
+            raise
 
         if response.status_code == 429:
             retry_after = response.json().get("retry_after", 1)
             time.sleep(float(retry_after) + 0.25)
             continue
+
+        if 500 <= response.status_code < 600:
+            if attempt < REQUEST_MAX_ATTEMPTS:
+                wait_seconds = REQUEST_BACKOFF_SECONDS * attempt
+                print(
+                    f"Discord API returned {response.status_code}, retrying in {wait_seconds}s: {url}",
+                    file=sys.stderr,
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            if allow_missing:
+                print(
+                    f"Skipping unavailable Discord API request after {REQUEST_MAX_ATTEMPTS} attempts: {url}",
+                    file=sys.stderr,
+                )
+                return None
 
         if allow_missing and response.status_code in {403, 404}:
             return None
