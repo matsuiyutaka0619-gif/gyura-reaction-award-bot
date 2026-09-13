@@ -15,8 +15,10 @@ import requests
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_EPOCH_MS = 1420070400000
-CHANNEL_TYPES_TO_SCAN = {0, 5}
-AWARD_LIMIT = 3
+MESSAGE_CHANNEL_TYPES = {0, 5}
+THREAD_PARENT_CHANNEL_TYPES = {0, 5, 15, 16}
+THREAD_CHANNEL_TYPES = {10, 11, 12}
+DEFAULT_AWARD_LIMIT = 5
 REQUEST_MAX_ATTEMPTS = 5
 REQUEST_BACKOFF_SECONDS = 2
 
@@ -42,6 +44,7 @@ class Config:
     timezone_name: str
     award_time: str
     message_preview_length: int
+    award_limit: int
 
 
 def load_config(path: str = "config.json") -> Config:
@@ -54,6 +57,7 @@ def load_config(path: str = "config.json") -> Config:
         timezone_name=data.get("timezone", "Asia/Tokyo"),
         award_time=data.get("award_time", "05:00"),
         message_preview_length=int(data.get("message_preview_length", 80)),
+        award_limit=int(data.get("award_limit", DEFAULT_AWARD_LIMIT)),
     )
 
 
@@ -171,17 +175,108 @@ def fetch_bot_user_id(headers: dict[str, str]) -> str:
     return str(user["id"])
 
 
-def fetch_channels(headers: dict[str, str]) -> list[dict[str, Any]]:
+def fetch_guild_channels(headers: dict[str, str]) -> list[dict[str, Any]]:
     channels = request_json("GET", f"{DISCORD_API_BASE}/guilds/{CONFIG.guild_id}/channels", headers=headers)
     if not channels:
         return []
 
-    return [
-        channel
-        for channel in channels
-        if channel.get("type") in CHANNEL_TYPES_TO_SCAN
+    return channels
+
+
+def fetch_active_threads(headers: dict[str, str]) -> list[dict[str, Any]]:
+    response = request_json(
+        "GET",
+        f"{DISCORD_API_BASE}/guilds/{CONFIG.guild_id}/threads/active",
+        headers=headers,
+        allow_missing=True,
+    )
+    if not response:
+        return []
+
+    return response.get("threads", [])
+
+
+def fetch_archived_public_threads(
+    parent_channel_id: str,
+    headers: dict[str, str],
+    start: datetime,
+) -> list[dict[str, Any]]:
+    threads: list[dict[str, Any]] = []
+    before: str | None = None
+
+    while True:
+        params: dict[str, Any] = {"limit": 100}
+        if before:
+            params["before"] = before
+
+        response = request_json(
+            "GET",
+            f"{DISCORD_API_BASE}/channels/{parent_channel_id}/threads/archived/public",
+            headers=headers,
+            allow_missing=True,
+            params=params,
+        )
+        if not response:
+            break
+
+        batch = response.get("threads", [])
+        if not batch:
+            break
+
+        threads.extend(batch)
+        archive_timestamps = [
+            thread.get("thread_metadata", {}).get("archive_timestamp")
+            for thread in batch
+        ]
+        archive_timestamps = [value for value in archive_timestamps if value]
+
+        if archive_timestamps:
+            oldest_archive = min(parse_discord_timestamp(value) for value in archive_timestamps)
+            if oldest_archive < start:
+                break
+            before = min(archive_timestamps)
+        else:
+            break
+
+        if not response.get("has_more"):
+            break
+
+    return threads
+
+
+def fetch_channels_to_scan(
+    headers: dict[str, str],
+    start: datetime,
+) -> list[dict[str, Any]]:
+    guild_channels = fetch_guild_channels(headers)
+    parent_channels = {
+        str(channel["id"]): channel
+        for channel in guild_channels
+        if channel.get("type") in THREAD_PARENT_CHANNEL_TYPES
         and str(channel.get("id")) not in CONFIG.excluded_channel_ids
-    ]
+    }
+    channels_to_scan: dict[str, dict[str, Any]] = {
+        channel_id: channel
+        for channel_id, channel in parent_channels.items()
+        if channel.get("type") in MESSAGE_CHANNEL_TYPES
+    }
+
+    threads = fetch_active_threads(headers)
+    for parent_channel_id in parent_channels:
+        threads.extend(fetch_archived_public_threads(parent_channel_id, headers, start))
+
+    for thread in threads:
+        thread_id = str(thread.get("id", ""))
+        parent_id = str(thread.get("parent_id", ""))
+        if (
+            thread_id
+            and thread.get("type") in THREAD_CHANNEL_TYPES
+            and thread_id not in CONFIG.excluded_channel_ids
+            and parent_id in parent_channels
+        ):
+            channels_to_scan[thread_id] = thread
+
+    return list(channels_to_scan.values())
 
 
 def fetch_messages_for_channel(
@@ -307,11 +402,15 @@ def find_top_candidates(
     bot_user_id: str,
     start: datetime,
     end: datetime,
-    limit: int = AWARD_LIMIT,
+    limit: int | None = None,
 ) -> list[AwardCandidate]:
     candidates: list[AwardCandidate] = []
+    candidate_limit = CONFIG.award_limit if limit is None else limit
 
-    for channel in fetch_channels(headers):
+    channels = fetch_channels_to_scan(headers, start)
+    print(f"Discovered {len(channels)} readable message channels and threads.")
+
+    for channel in channels:
         channel_id = str(channel["id"])
         channel_name = channel.get("name", channel_id)
         print(f"Scanning #{channel_name} ({channel_id})")
@@ -339,14 +438,14 @@ def find_top_candidates(
 
             candidates.append(candidate)
 
-    return sorted(candidates, key=lambda candidate: candidate.voter_count, reverse=True)[:limit]
+    return sorted(candidates, key=lambda candidate: candidate.voter_count, reverse=True)[:candidate_limit]
 
 
 def build_announcement(candidates: list[AwardCandidate]) -> str:
     if not candidates:
         return "🏆 本日のギュラ鯖リアクション賞🏆\n\n本日は対象メッセージがありませんでした。"
 
-    rank_labels = ["🥇 1位", "🥈 2位", "🥉 3位"]
+    rank_labels = ["🥇 1位", "🥈 2位", "🥉 3位", "4️⃣ 4位", "5️⃣ 5位"]
     lines = ["🏆 本日のギュラ鯖リアクション賞🏆"]
 
     for index, candidate in enumerate(candidates):
@@ -354,7 +453,7 @@ def build_announcement(candidates: list[AwardCandidate]) -> str:
         lines.extend(
             [
                 "",
-                rank_labels[index],
+                rank_labels[index] if index < len(rank_labels) else f"{index + 1}位",
                 f"投稿者: <@{candidate.author_id}>",
                 f"リアクション人数: {candidate.voter_count}",
                 "",
