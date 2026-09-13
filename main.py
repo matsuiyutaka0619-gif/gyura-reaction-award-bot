@@ -38,6 +38,14 @@ class AwardCandidate:
 
 
 @dataclass
+class CandidateMessage:
+    reaction_upper_bound: int
+    scan_order: int
+    channel_id: str
+    message: dict[str, Any]
+
+
+@dataclass
 class Config:
     guild_id: str
     excluded_channel_ids: set[str]
@@ -397,6 +405,10 @@ def count_unique_reaction_users(
     return len(voter_ids)
 
 
+def get_reaction_count_upper_bound(message: dict[str, Any]) -> int:
+    return sum(max(0, int(reaction.get("count", 0))) for reaction in message.get("reactions", []))
+
+
 def find_top_candidates(
     headers: dict[str, str],
     bot_user_id: str,
@@ -404,8 +416,12 @@ def find_top_candidates(
     end: datetime,
     limit: int | None = None,
 ) -> list[AwardCandidate]:
-    candidates: list[AwardCandidate] = []
     candidate_limit = CONFIG.award_limit if limit is None else limit
+    if candidate_limit <= 0:
+        return []
+
+    possible_candidates: list[CandidateMessage] = []
+    scan_order = 0
 
     channels = fetch_channels_to_scan(headers, start)
     print(f"Discovered {len(channels)} readable message channels and threads.")
@@ -423,22 +439,63 @@ def find_top_candidates(
             if not message.get("reactions"):
                 continue
 
-            voter_count = count_unique_reaction_users(channel_id, message, headers, bot_user_id)
-            if voter_count <= 0:
+            reaction_upper_bound = get_reaction_count_upper_bound(message)
+            if reaction_upper_bound <= 0:
                 continue
 
-            candidate = AwardCandidate(
-                voter_count=voter_count,
-                message_id=str(message["id"]),
-                channel_id=channel_id,
-                author_id=str(author.get("id", "")),
-                author_name=author.get("global_name") or author.get("username") or "unknown",
-                content=message.get("content", ""),
+            possible_candidates.append(
+                CandidateMessage(
+                    reaction_upper_bound=reaction_upper_bound,
+                    scan_order=scan_order,
+                    channel_id=channel_id,
+                    message=message,
+                )
             )
+            scan_order += 1
 
-            candidates.append(candidate)
+    possible_candidates.sort(
+        key=lambda candidate: (-candidate.reaction_upper_bound, candidate.scan_order)
+    )
+    verified_candidates: list[tuple[int, AwardCandidate]] = []
 
-    return sorted(candidates, key=lambda candidate: candidate.voter_count, reverse=True)[:candidate_limit]
+    print(
+        f"Found {len(possible_candidates)} messages with reactions. "
+        "Verifying only candidates that can still reach the ranking."
+    )
+
+    for possible_candidate in possible_candidates:
+        if len(verified_candidates) >= candidate_limit:
+            current_cutoff = sorted(
+                (candidate.voter_count for _, candidate in verified_candidates),
+                reverse=True,
+            )[candidate_limit - 1]
+            if possible_candidate.reaction_upper_bound < current_cutoff:
+                break
+
+        message = possible_candidate.message
+        channel_id = possible_candidate.channel_id
+        voter_count = count_unique_reaction_users(channel_id, message, headers, bot_user_id)
+        if voter_count <= 0:
+            continue
+
+        author = message.get("author", {})
+        candidate = AwardCandidate(
+            voter_count=voter_count,
+            message_id=str(message["id"]),
+            channel_id=channel_id,
+            author_id=str(author.get("id", "")),
+            author_name=author.get("global_name") or author.get("username") or "unknown",
+            content=message.get("content", ""),
+        )
+        verified_candidates.append((possible_candidate.scan_order, candidate))
+
+    print(
+        f"Verified exact reaction users for {len(verified_candidates)} "
+        f"of {len(possible_candidates)} candidate messages."
+    )
+
+    verified_candidates.sort(key=lambda item: (-item[1].voter_count, item[0]))
+    return [candidate for _, candidate in verified_candidates[:candidate_limit]]
 
 
 def build_announcement(candidates: list[AwardCandidate]) -> str:

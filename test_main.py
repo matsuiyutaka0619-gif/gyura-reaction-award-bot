@@ -55,6 +55,37 @@ class ReactionAwardBotTests(unittest.TestCase):
         for rank in range(1, 6):
             self.assertIn(f"{rank}位", announcement)
 
+    @patch("main.count_unique_reaction_users")
+    @patch("main.fetch_messages_for_channel")
+    @patch("main.fetch_channels_to_scan")
+    def test_verifies_only_messages_that_can_reach_the_ranking(
+        self,
+        fetch_channels_to_scan,
+        fetch_messages_for_channel,
+        count_unique_reaction_users,
+    ):
+        fetch_channels_to_scan.return_value = [{"id": "channel", "type": 0, "name": "general"}]
+        fetch_messages_for_channel.return_value = [
+            {
+                "id": f"message-{index}",
+                "author": {"id": f"author-{index}", "username": f"Author {index}"},
+                "content": f"Message {index}",
+                "reactions": [{"count": upper_bound}],
+            }
+            for index, upper_bound in enumerate([10, 9, 8, 3])
+        ]
+        count_unique_reaction_users.side_effect = [5, 4, 1]
+
+        candidates = main.find_top_candidates({}, "bot", main.get_window()[0], main.get_window()[1], limit=2)
+
+        self.assertEqual([candidate.voter_count for candidate in candidates], [5, 4])
+        self.assertEqual(count_unique_reaction_users.call_count, 3)
+
+    def test_reaction_count_is_an_upper_bound_for_unique_users(self):
+        message = {"reactions": [{"count": 4}, {"count": 3}]}
+
+        self.assertEqual(main.get_reaction_count_upper_bound(message), 7)
+
 
 if __name__ == "__main__":
     unittest.main()
