@@ -2,11 +2,11 @@
 
 ギュラ鯖内で、当日5:00から翌日4:59までにリアクションした人数が多かったメッセージTOP5を毎日発表するBotです。
 
-無料運用を優先して、GitHub Actionsで毎日5:00頃に実行します。GitHub Actionsの定期実行は少し遅れることがあります。
+無料運用を優先して、GitHub Actionsで毎日5:05（日本時間）に起動を予約します。GitHub側の混雑により遅れることがあります。
 
 ## できること
 
-- 毎日5:00頃に発表
+- 毎日5:05以降に発表
 - 集計範囲は前日5:00から当日4:59
 - Botが読めるサーバー内テキストチャンネル、スレッド、フォーラム投稿を集計
 - 除外チャンネルを設定可能
@@ -133,7 +133,7 @@ https://discord.com/channels/...
 
 GitHub ActionsのActionsタブから `Daily Reaction Award` を選び、`Run workflow` を押すと手動実行できます。
 
-手動実行が成功する場合、Bot本体とWebhook設定は正常です。毎日の自動実行だけ遅れる場合は、GitHub Actionsのスケジュール遅延です。
+GitHubは、公開リポジトリで60日間活動がないと定期実行を自動停止します。実行履歴が途切れた場合は、`Daily Reaction Award` の画面で `Enable workflow` が表示されていないか確認し、表示されていれば押して再有効化してください。[GitHub公式ガイド](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)
 
 ## フォーラムを含む集計範囲
 
