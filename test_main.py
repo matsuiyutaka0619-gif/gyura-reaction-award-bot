@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 
 
 class ReactionAwardBotTests(unittest.TestCase):
+    @patch("main.time.sleep")
+    @patch("main.requests.request")
+    def test_rate_limit_retries_are_bounded(self, request, sleep):
+        request.return_value = Mock(status_code=429, headers={"Retry-After": "1.5"})
+
+        with self.assertRaisesRegex(RuntimeError, "remained rate limited"):
+            main.request_json("GET", "https://example.com", allow_missing=True)
+
+        self.assertEqual(request.call_count, main.REQUEST_MAX_ATTEMPTS)
+        self.assertEqual(sleep.call_count, main.REQUEST_MAX_ATTEMPTS - 1)
+        sleep.assert_called_with(1.75)
+
+    @patch("main.time.sleep")
+    @patch("main.requests.request")
+    def test_rate_limit_does_not_wait_beyond_budget(self, request, sleep):
+        request.return_value = Mock(status_code=429, headers={"Retry-After": "3600"})
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds the retry budget"):
+            main.request_json("GET", "https://example.com")
+
+        sleep.assert_not_called()
+
     @patch("main.fetch_archived_public_threads")
     @patch("main.fetch_active_threads")
     @patch("main.fetch_guild_channels")
@@ -85,6 +107,35 @@ class ReactionAwardBotTests(unittest.TestCase):
         message = {"reactions": [{"count": 4}, {"count": 3}]}
 
         self.assertEqual(main.get_reaction_count_upper_bound(message), 7)
+
+    def test_adds_separator_after_trailing_url_in_preview(self):
+        self.assertEqual(
+            main.format_message_preview("詳しくはこちら https://example.com/news?id=42", 80),
+            "詳しくはこちら https://example.com/news?id=42 ",
+        )
+
+    def test_does_not_add_separator_to_normal_preview(self):
+        self.assertEqual(
+            main.format_message_preview("今日は楽しかった", 80),
+            "今日は楽しかった",
+        )
+
+    def test_announcement_separates_trailing_url_from_closing_quote(self):
+        candidate = main.AwardCandidate(
+            voter_count=3,
+            message_id="message",
+            channel_id="channel",
+            author_id="author",
+            author_name="Author",
+            content="詳しくはこちら https://example.com/news?id=42",
+        )
+
+        announcement = main.build_announcement([candidate])
+
+        self.assertIn(
+            "「詳しくはこちら https://example.com/news?id=42 」",
+            announcement,
+        )
 
 
 if __name__ == "__main__":

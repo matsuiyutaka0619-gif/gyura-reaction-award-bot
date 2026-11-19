@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ THREAD_CHANNEL_TYPES = {10, 11, 12}
 DEFAULT_AWARD_LIMIT = 5
 REQUEST_MAX_ATTEMPTS = 5
 REQUEST_BACKOFF_SECONDS = 2
+DISCORD_MAX_RATE_LIMIT_WAIT_SECONDS = 120
+TRAILING_URL_PATTERN = re.compile(r"https?://[^\s<>]+$", re.IGNORECASE)
 
 
 @dataclass
@@ -101,8 +104,16 @@ def request_json(
             raise
 
         if response.status_code == 429:
-            retry_after = response.json().get("retry_after", 1)
-            time.sleep(float(retry_after) + 0.25)
+            if attempt >= REQUEST_MAX_ATTEMPTS:
+                raise RuntimeError("Discord API remained rate limited after retries.")
+            try:
+                retry_after = float(response.headers.get("Retry-After") or response.json()["retry_after"])
+            except (ValueError, TypeError, KeyError):
+                retry_after = REQUEST_BACKOFF_SECONDS * attempt
+            if not 0 <= retry_after <= DISCORD_MAX_RATE_LIMIT_WAIT_SECONDS:
+                raise RuntimeError("Discord API rate limit wait exceeds the retry budget.")
+            print(f"Discord API rate limited. Retrying in {retry_after + 0.25:g}s.", file=sys.stderr)
+            time.sleep(retry_after + 0.25)
             continue
 
         if 500 <= response.status_code < 600:
@@ -174,6 +185,16 @@ def truncate_message(content: str, max_length: int) -> str:
         return normalized
 
     return normalized[: max_length - 3].rstrip() + "..."
+
+
+def format_message_preview(content: str, max_length: int) -> str:
+    """Keep Discord from treating the closing Japanese quote as URL text."""
+    preview = truncate_message(content, max_length)
+
+    if TRAILING_URL_PATTERN.search(preview):
+        return f"{preview} "
+
+    return preview
 
 
 def fetch_bot_user_id(headers: dict[str, str]) -> str:
@@ -506,7 +527,7 @@ def build_announcement(candidates: list[AwardCandidate]) -> str:
     lines = ["🏆 本日のギュラ鯖リアクション賞🏆"]
 
     for index, candidate in enumerate(candidates):
-        preview = truncate_message(candidate.content, CONFIG.message_preview_length)
+        preview = format_message_preview(candidate.content, CONFIG.message_preview_length)
         lines.extend(
             [
                 "",
